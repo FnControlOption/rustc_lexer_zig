@@ -111,3 +111,104 @@ const kind = @unionInit(LiteralKind, kind_name, .{ .terminated = terminated });
 </td>
 </tr>
 </table>
+
+### [Multiline String Literals](https://ziglang.org/documentation/master/#Multiline-String-Literals)
+
+<table>
+<tr>
+<th>Rust 🦀</th>
+<td>
+
+```rust
+#[test]
+fn comment_flavors() {
+    check_lexing(
+        r"
+// line
+//// line as well
+/// outer doc line
+//! inner doc line
+/* block */
+/**/
+/*** also block */
+/** outer doc block */
+/*! inner doc block */
+",
+        // ...
+    )
+}
+```
+
+</td>
+</tr>
+<tr></tr>
+<tr>
+<th>Zig ⚡</th>
+<td>
+
+```zig
+test "comment flavors" {
+    try checkLexing(
+        \\// line
+        \\//// line as well
+        \\/// outer doc line
+        \\//! inner doc line
+        \\/* block */
+        \\/**/
+        \\/*** also block */
+        \\/** outer doc block */
+        \\/*! inner doc block */
+    ,
+        // ...
+    );
+}
+```
+
+</td>
+</tr>
+</table>
+
+### [Anonymous Struct Literals](https://ziglang.org/documentation/master/#Anonymous-Struct-Literals)
+
+<table>
+<tr>
+<th>Rust 🦀</th>
+<td>
+
+```rust
+#[test]
+fn smoke_test() {
+    check_lexing(
+        "/* my source file */ fn main() { println!(\"zebra\"); }\n",
+        expect![[r#"
+            Token { kind: BlockComment { doc_style: None, terminated: true }, len: 20 }
+            Token { kind: Whitespace, len: 1 }
+            ...
+        "#]],
+    )
+}
+```
+
+</td>
+</tr>
+<tr></tr>
+<tr>
+<th>Zig ⚡</th>
+<td>
+
+```zig
+test "smoke test" {
+    try checkLexing(
+        "/* my source file */ fn main() { println!(\"zebra\"); }\n",
+        &.{
+            .{ .kind = .{ .block_comment = .{ .doc_style = null, .terminated = true } }, .len = 20 },
+            .{ .kind = .whitespace, .len = 1 },
+            // ...
+        },
+    );
+}
+```
+
+</td>
+</tr>
+</table>
