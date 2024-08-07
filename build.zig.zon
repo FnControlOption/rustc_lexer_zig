@@ -1,0 +1,30 @@
+.{
+    .name = "rustc_lexer",
+    .version = "0.0.0",
+    .minimum_zig_version = "0.14.0-dev.367+a57479afc",
+
+    .dependencies = .{
+        .unicode_properties = .{
+            .url = "https://github.com/FnControlOption/unicode-properties-zig/archive/refs/tags/0.1.0.tar.gz",
+            .hash = "1220adf2e83315b51f807ec192a9182ff94be367ae760aae6a225ba6295eb976a2be",
+        },
+        .unicode_xid = .{
+            .url = "https://github.com/FnControlOption/unicode-xid-zig/archive/refs/tags/0.1.0.tar.gz",
+            .hash = "1220abcf2ff2b2c69ac62124bfa9ed7b2456cb58ef6969785541071db043b513b1fe",
+        },
+    },
+
+    .paths = .{
+        "COPYRIGHT-RUST",
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+        "README.md",
+        "build.zig",
+        "build.zig.zon",
+        "cursor.zig",
+        "rustc_lexer.zig",
+        "tests.zig",
+        "unescape.zig",
+        "util.zig",
+    },
+}
