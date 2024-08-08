@@ -2,6 +2,12 @@
 
 [Zig](https://ziglang.org) port of [rustc_lexer](https://github.com/rust-lang/rust/tree/master/compiler/rustc_lexer)
 
+| Rust 🦀 | Zig ⚡ |
+| --- | --- |
+| `char` | `u21` |
+| `&str` | `std.unicode.Utf8View` |
+| `std::str::Chars` | `std.unicode.Utf8Iterator` |
+
 ## Highlights
 
 ### [`comptime`](https://ziglang.org/documentation/master/#comptime) + [`@unionInit`](https://ziglang.org/documentation/master/#unionInit)
