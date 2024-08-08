@@ -4,7 +4,7 @@
 
 ## Highlights
 
-### [`@unionInit`](https://ziglang.org/documentation/master/#unionInit)
+### [`comptime`](https://ziglang.org/documentation/master/#comptime) + [`@unionInit`](https://ziglang.org/documentation/master/#unionInit)
 
 <table>
 <tr>
