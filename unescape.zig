@@ -83,28 +83,34 @@ pub fn isFatalError(err: EscapeError) bool {
 ///
 /// Values are returned by invoking `callback`. For `char` and `byte` modes,
 /// the callback will be called exactly once.
-pub fn unescapeUnicode(src: Utf8View, mode: Mode, context: anytype, callback: fn (@TypeOf(context), usize, usize, EscapeError!u21) void) void {
+pub fn unescapeUnicode(
+    src: Utf8View,
+    mode: Mode,
+    context: anytype,
+    comptime Error: type,
+    comptime callback: fn (@TypeOf(context), usize, usize, EscapeError!u21) Error!void,
+) Error!void {
     const wrapper = struct {
-        fn str(ctx: @TypeOf(context), start: usize, end: usize, result: EscapeError!CharOrByte) void {
+        fn str(ctx: @TypeOf(context), start: usize, end: usize, result: EscapeError!CharOrByte) Error!void {
             const res = if (result) |res| res.toChar() else |err| err;
-            callback(ctx, start, end, res);
+            try callback(ctx, start, end, res);
         }
-        fn rawCStr(ctx: @TypeOf(context), start: usize, end: usize, result: EscapeError!u21) void {
+        fn rawCStr(ctx: @TypeOf(context), start: usize, end: usize, result: EscapeError!u21) Error!void {
             const res = if (result) |res| blk: {
                 break :blk if (res == 0) error.NulInCStr else res;
             } else |err| err;
-            callback(ctx, start, end, res);
+            try callback(ctx, start, end, res);
         }
     };
     switch (mode) {
         .char, .byte => {
             var iter = src.iterator();
             const res = unescapeCharOrByte(&iter, mode);
-            callback(context, 0, iter.i, res);
+            try callback(context, 0, iter.i, res);
         },
-        .str, .byte_str => unescapeNonRawCommon(src, mode, context, wrapper.str),
-        .raw_str, .raw_byte_str => checkRawCommon(src, mode, context, callback),
-        .raw_c_str => checkRawCommon(src, mode, context, wrapper.rawCStr),
+        .str, .byte_str => try unescapeNonRawCommon(src, mode, context, Error, wrapper.str),
+        .raw_str, .raw_byte_str => try checkRawCommon(src, mode, context, Error, callback),
+        .raw_c_str => try checkRawCommon(src, mode, context, Error, wrapper.rawCStr),
         .c_str => unreachable,
     }
 }
@@ -142,9 +148,15 @@ pub const MixedUnit = union(enum) {
 /// a sequence of escaped characters or errors.
 ///
 /// Values are returned by invoking `callback`.
-pub fn unescapeMixed(src: Utf8View, mode: Mode, context: anytype, callback: fn (@TypeOf(context), usize, usize, EscapeError!MixedUnit) void) void {
+pub fn unescapeMixed(
+    src: Utf8View,
+    mode: Mode,
+    context: anytype,
+    comptime Error: type,
+    comptime callback: fn (@TypeOf(context), usize, usize, EscapeError!MixedUnit) Error!void,
+) Error!void {
     const wrapper = struct {
-        fn func(ctx: @TypeOf(context), start: usize, end: usize, result: EscapeError!CharOrByte) void {
+        fn func(ctx: @TypeOf(context), start: usize, end: usize, result: EscapeError!CharOrByte) Error!void {
             const res = if (result) |res| switch (res) {
                 .char => |c| if (c == 0)
                     error.NulInCStr
@@ -152,11 +164,11 @@ pub fn unescapeMixed(src: Utf8View, mode: Mode, context: anytype, callback: fn (
                     MixedUnit.fromChar(c),
                 .byte => |n| MixedUnit.fromByte(n),
             } else |err| err;
-            callback(ctx, start, end, res);
+            try callback(ctx, start, end, res);
         }
     };
     switch (mode) {
-        .c_str => unescapeNonRawCommon(src, mode, context, wrapper.func),
+        .c_str => try unescapeNonRawCommon(src, mode, context, Error, wrapper.func),
         .char, .byte, .str, .raw_str, .byte_str, .raw_byte_str, .raw_c_str => unreachable,
     }
 }
@@ -332,7 +344,7 @@ fn scanUnicode(iter: *Utf8Iterator, allow_unicode_escapes: bool) EscapeError!u21
             if (!allow_unicode_escapes)
                 return error.UnicodeEscapeInByte;
 
-            return math.cast(u21, value) orelse {
+            return util.charFromU32(value) orelse {
                 return if (value > 0x10FFFF)
                     error.OutOfRangeUnicodeEscape
                 else
@@ -375,10 +387,16 @@ fn unescapeCharOrByte(iter: *Utf8Iterator, mode: Mode) EscapeError!u21 {
 
 /// Takes a contents of a string literal (without quotes) and produces a
 /// sequence of escaped characters or errors.
-fn unescapeNonRawCommon(src: Utf8View, mode: Mode, context: anytype, callback: fn (@TypeOf(context), usize, usize, EscapeError!CharOrByte) void) void {
+fn unescapeNonRawCommon(
+    src: Utf8View,
+    mode: Mode,
+    context: anytype,
+    comptime Error: type,
+    comptime callback: fn (@TypeOf(context), usize, usize, EscapeError!CharOrByte) Error!void,
+) Error!void {
     const wrapper = struct {
-        fn func(ctx: @TypeOf(context), start: usize, end: usize, err: EscapeError) void {
-            callback(ctx, start, end, err);
+        fn func(ctx: @TypeOf(context), start: usize, end: usize, err: EscapeError) Error!void {
+            try callback(ctx, start, end, err);
         }
     };
 
@@ -389,7 +407,7 @@ fn unescapeNonRawCommon(src: Utf8View, mode: Mode, context: anytype, callback: f
     // `skipAsciiWhitespace` makes us to skip over chars without counting
     // them in the range computation.
     while (iter.nextCodepointSlice()) |s| {
-        const start = iter.i - s.len;
+        const start = src.bytes.len - iter.bytes[iter.i..].len - s.len;
         const c = unicode.utf8Decode(s) catch unreachable;
         const res = switch (c) {
             '\\' => blk: {
@@ -399,7 +417,7 @@ fn unescapeNonRawCommon(src: Utf8View, mode: Mode, context: anytype, callback: f
                     // if unescaped '\' character is followed by '\n'.
                     // For details see [Rust language reference]
                     // (https://doc.rust-lang.org/reference/tokens.html#string-literals).
-                    skipAsciiWhitespace(&iter, start, context, wrapper.func);
+                    try skipAsciiWhitespace(&iter, start, context, Error, wrapper.func);
                     continue;
                 } else {
                     break :blk scanEscape(&iter, mode);
@@ -412,12 +430,18 @@ fn unescapeNonRawCommon(src: Utf8View, mode: Mode, context: anytype, callback: f
             else |err|
                 err,
         };
-        const end = iter.i;
-        callback(context, start, end, res);
+        const end = src.bytes.len - iter.bytes[iter.i..].len;
+        try callback(context, start, end, res);
     }
 }
 
-fn skipAsciiWhitespace(iter: *Utf8Iterator, start: usize, context: anytype, callback: fn (@TypeOf(context), usize, usize, EscapeError) void) void {
+fn skipAsciiWhitespace(
+    iter: *Utf8Iterator,
+    start: usize,
+    context: anytype,
+    comptime Error: type,
+    comptime callback: fn (@TypeOf(context), usize, usize, EscapeError) Error!void,
+) Error!void {
     const spaces = [_]u8{ ' ', '\t', '\n', '\r' };
     const tail_with_spaces = iter.bytes[iter.i..];
     const first_non_space = mem.indexOfNone(u8, tail_with_spaces, &spaces) orelse
@@ -425,7 +449,7 @@ fn skipAsciiWhitespace(iter: *Utf8Iterator, start: usize, context: anytype, call
     if (mem.indexOfScalar(u8, tail_with_spaces[1..first_non_space], '\n') != null) {
         // The +1 accounts for the escaping slash.
         const end = start + first_non_space + 1;
-        callback(context, start, end, error.MultipleSkippedLinesWarning);
+        try callback(context, start, end, error.MultipleSkippedLinesWarning);
     }
     const tail_without_spaces = Utf8View.initUnchecked(tail_with_spaces[first_non_space..]);
     var temp_iter = tail_without_spaces.iterator();
@@ -435,7 +459,7 @@ fn skipAsciiWhitespace(iter: *Utf8Iterator, start: usize, context: anytype, call
             // For error reporting, we would like the span to contain the character that was not
             // skipped. The +1 is necessary to account for the leading \ that started the escape.
             const end = start + first_non_space + s.len + 1;
-            callback(context, start, end, error.UnskippedWhitespaceWarning);
+            try callback(context, start, end, error.UnskippedWhitespaceWarning);
         }
     }
     iter.* = tail_without_spaces.iterator();
@@ -445,7 +469,13 @@ fn skipAsciiWhitespace(iter: *Utf8Iterator, start: usize, context: anytype, call
 /// sequence of characters or errors.
 /// NOTE: Raw strings do not perform any explicit character escaping, here we
 /// only produce errors on bare CR.
-fn checkRawCommon(src: Utf8View, mode: Mode, context: anytype, callback: fn (@TypeOf(context), usize, usize, EscapeError!u21) void) void {
+fn checkRawCommon(
+    src: Utf8View,
+    mode: Mode,
+    context: anytype,
+    comptime Error: type,
+    comptime callback: fn (@TypeOf(context), usize, usize, EscapeError!u21) Error!void,
+) Error!void {
     var iter = src.iterator();
     const allow_unicode_chars = mode.allowUnicodeChars(); // get this outside the loop
 
@@ -454,13 +484,13 @@ fn checkRawCommon(src: Utf8View, mode: Mode, context: anytype, callback: fn (@Ty
     // doesn't have to worry about skipping any chars.
     while (iter.nextCodepointSlice()) |s| {
         const c = unicode.utf8Decode(s) catch unreachable;
-        const start = iter.i - s.len;
+        const start = src.bytes.len - iter.bytes[iter.i..].len - s.len;
         const res = switch (c) {
             '\r' => error.BareCarriageReturnInRawString,
             else => asciiCheck(c, allow_unicode_chars),
         };
-        const end = iter.i;
-        callback(context, start, end, res);
+        const end = src.bytes.len - iter.bytes[iter.i..].len;
+        try callback(context, start, end, res);
     }
 }
 

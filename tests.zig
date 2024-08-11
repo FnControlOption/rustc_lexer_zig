@@ -1,14 +1,22 @@
 const std = @import("std");
+const ArrayList = std.ArrayList;
+const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const allocator = testing.allocator;
 const Utf8View = std.unicode.Utf8View;
 const rustc_lexer = @import("rustc_lexer");
 const RawStrError = rustc_lexer.RawStrError;
 const Token = rustc_lexer.Token;
 const tokenize = rustc_lexer.tokenize;
 const stripShebang = rustc_lexer.stripShebang;
+const unescape = rustc_lexer.unescape;
+const unescapeChar = unescape.unescapeChar;
+const unescapeByte = unescape.unescapeByte;
+const unescapeUnicode = unescape.unescapeUnicode;
+const EscapeError = unescape.EscapeError;
+const byteFromChar = unescape.byteFromChar;
 
 fn checkRawStr(s: []const u8, expected: RawStrError!u8) !void {
-    const allocator = testing.allocator;
     const raw_str = try std.fmt.allocPrint(allocator, "r{s}", .{s});
     defer allocator.free(raw_str);
     var tokenizer = tokenize(try Utf8View.init(raw_str));
@@ -65,7 +73,6 @@ test "unterminated no pound" {
 }
 
 test "too many hashes" {
-    const allocator = testing.allocator;
     const max_count = std.math.maxInt(u8);
     const hashes1 = "#" ** max_count;
     const hashes2 = "#" ** (max_count + 1);
@@ -131,9 +138,8 @@ test "shebang followed by attrib" {
 }
 
 fn checkLexing(src: []const u8, expected: []const Token) !void {
-    const allocator = testing.allocator;
     var tokenizer = tokenize(try Utf8View.init(src));
-    var actual = std.ArrayList(Token).init(allocator);
+    var actual = ArrayList(Token).init(allocator);
     defer actual.deinit();
     while (tokenizer.next()) |token|
         try actual.append(token);
@@ -283,4 +289,370 @@ test "literal suffixes" {
             .{ .kind = .{ .literal = .{ .kind = .{ .raw_byte_str = .{ .n_hashes = 3 } }, .suffix_start = 13 } }, .len = 19 },
         },
     );
+}
+
+fn CheckUnescaped(comptime mode: unescape.Mode) type {
+    return struct {
+        const Self = @This();
+        const Error = Allocator.Error;
+        const Entry = struct { usize, usize, EscapeError!u21 };
+
+        unescaped: ArrayList(Entry),
+
+        fn deinit(self: *Self) void {
+            self.unescaped.deinit();
+            self.* = undefined;
+        }
+
+        fn callback(self: *Self, start: usize, end: usize, res: EscapeError!u21) Error!void {
+            try self.unescaped.append(.{ start, end, res });
+        }
+
+        fn run(literal: []const u8, expected: []const Entry) !void {
+            const literal_text = try Utf8View.init(literal);
+
+            var check = Self{ .unescaped = try ArrayList(Entry).initCapacity(allocator, literal.len) };
+            defer check.deinit();
+
+            try unescapeUnicode(literal_text, mode, &check, Error, callback);
+            try testing.expectEqualSlices(Entry, expected, check.unescaped.items);
+        }
+    };
+}
+
+test "unescape char bad" {
+    const Check = struct {
+        fn run(literal: []const u8, expected_error: EscapeError) !void {
+            const literal_text = try Utf8View.init(literal);
+            try testing.expectEqual(expected_error, unescapeChar(literal_text));
+        }
+    };
+
+    try Check.run("", error.ZeroChars);
+    try Check.run("\\", error.LoneSlash);
+
+    try Check.run("\n", error.EscapeOnlyChar);
+    try Check.run("\t", error.EscapeOnlyChar);
+    try Check.run("'", error.EscapeOnlyChar);
+    try Check.run("\r", error.BareCarriageReturn);
+
+    try Check.run("spam", error.MoreThanOneChar);
+    try Check.run("\\x0ff", error.MoreThanOneChar);
+    try Check.run("\\\"a\"", error.MoreThanOneChar);
+    try Check.run("\\na", error.MoreThanOneChar);
+    try Check.run("\\ra", error.MoreThanOneChar);
+    try Check.run("\\ta", error.MoreThanOneChar);
+    try Check.run("\\\\a", error.MoreThanOneChar);
+    try Check.run("\\'a", error.MoreThanOneChar);
+    try Check.run("\\0a", error.MoreThanOneChar);
+    try Check.run("\\u{0}x", error.MoreThanOneChar);
+    try Check.run("\\u{1F63b}}", error.MoreThanOneChar);
+
+    try Check.run("\\v", error.InvalidEscape);
+    try Check.run("\\💩", error.InvalidEscape);
+    try Check.run("\\●", error.InvalidEscape);
+    try Check.run("\\\r", error.InvalidEscape);
+
+    try Check.run("\\x", error.TooShortHexEscape);
+    try Check.run("\\x0", error.TooShortHexEscape);
+    try Check.run("\\xf", error.TooShortHexEscape);
+    try Check.run("\\xa", error.TooShortHexEscape);
+    try Check.run("\\xx", error.InvalidCharInHexEscape);
+    try Check.run("\\xы", error.InvalidCharInHexEscape);
+    try Check.run("\\x🦀", error.InvalidCharInHexEscape);
+    try Check.run("\\xtt", error.InvalidCharInHexEscape);
+    try Check.run("\\xff", error.OutOfRangeHexEscape);
+    try Check.run("\\xFF", error.OutOfRangeHexEscape);
+    try Check.run("\\x80", error.OutOfRangeHexEscape);
+
+    try Check.run("\\u", error.NoBraceInUnicodeEscape);
+    try Check.run("\\u[0123]", error.NoBraceInUnicodeEscape);
+    try Check.run("\\u{0x}", error.InvalidCharInUnicodeEscape);
+    try Check.run("\\u{", error.UnclosedUnicodeEscape);
+    try Check.run("\\u{0000", error.UnclosedUnicodeEscape);
+    try Check.run("\\u{}", error.EmptyUnicodeEscape);
+    try Check.run("\\u{_0000}", error.LeadingUnderscoreUnicodeEscape);
+    try Check.run("\\u{0000000}", error.OverlongUnicodeEscape);
+    try Check.run("\\u{FFFFFF}", error.OutOfRangeUnicodeEscape);
+    try Check.run("\\u{ffffff}", error.OutOfRangeUnicodeEscape);
+    try Check.run("\\u{ffffff}", error.OutOfRangeUnicodeEscape);
+
+    try Check.run("\\u{DC00}", error.LoneSurrogateUnicodeEscape);
+    try Check.run("\\u{DDDD}", error.LoneSurrogateUnicodeEscape);
+    try Check.run("\\u{DFFF}", error.LoneSurrogateUnicodeEscape);
+
+    try Check.run("\\u{D800}", error.LoneSurrogateUnicodeEscape);
+    try Check.run("\\u{DAAA}", error.LoneSurrogateUnicodeEscape);
+    try Check.run("\\u{DBFF}", error.LoneSurrogateUnicodeEscape);
+}
+
+test "unescape char good" {
+    const Check = struct {
+        fn run(literal: []const u8, expected_char: u21) !void {
+            const literal_text = try Utf8View.init(literal);
+            try testing.expectEqual(expected_char, unescapeChar(literal_text));
+        }
+    };
+
+    try Check.run("a", 'a');
+    try Check.run("ы", 'ы');
+    try Check.run("🦀", '🦀');
+
+    try Check.run("\\\"", '"');
+    try Check.run("\\n", '\n');
+    try Check.run("\\r", '\r');
+    try Check.run("\\t", '\t');
+    try Check.run("\\\\", '\\');
+    try Check.run("\\'", '\'');
+    try Check.run("\\0", 0);
+
+    try Check.run("\\x00", 0);
+    try Check.run("\\x5a", 'Z');
+    try Check.run("\\x5A", 'Z');
+    try Check.run("\\x7f", 127);
+
+    try Check.run("\\u{0}", 0);
+    try Check.run("\\u{000000}", 0);
+    try Check.run("\\u{41}", 'A');
+    try Check.run("\\u{0041}", 'A');
+    try Check.run("\\u{00_41}", 'A');
+    try Check.run("\\u{4__1__}", 'A');
+    try Check.run("\\u{1F63b}", '😻');
+}
+
+test "unescape str warn" {
+    const Check = CheckUnescaped(.str);
+
+    // Check we can handle escaped newlines at the end of a file.
+    try Check.run("\\\n", &.{});
+    try Check.run("\\\n ", &.{});
+
+    try Check.run(
+        "\\\n \u{a0} x",
+        &.{
+            .{ 0, 5, error.UnskippedWhitespaceWarning },
+            .{ 3, 5, '\u{a0}' },
+            .{ 5, 6, ' ' },
+            .{ 6, 7, 'x' },
+        },
+    );
+    try Check.run("\\\n  \n  x", &.{ .{ 0, 7, error.MultipleSkippedLinesWarning }, .{ 7, 8, 'x' } });
+}
+
+test "unescape str good" {
+    const Check = struct {
+        const Self = @This();
+        const Error = Allocator.Error || error{ Utf8CannotEncodeSurrogateHalf, CodepointTooLarge };
+        const Result = union(enum) {
+            ok: ArrayList(u8),
+            err: struct { usize, usize, EscapeError },
+        };
+
+        buf: Result,
+
+        fn deinit(self: *Self) void {
+            switch (self.buf) {
+                .ok => |*b| b.deinit(),
+                .err => {},
+            }
+            self.* = undefined;
+        }
+
+        fn callback(self: *Self, start: usize, end: usize, res: EscapeError!u21) Error!void {
+            switch (self.buf) {
+                .ok => |*b| {
+                    if (res) |c| {
+                        var out: [4]u8 = undefined;
+                        const len = try std.unicode.utf8Encode(c, &out);
+                        try b.appendSlice(out[0..len]);
+                    } else |e| {
+                        self.buf = .{ .err = .{ start, end, e } };
+                    }
+                },
+                .err => {},
+            }
+        }
+
+        fn run(literal: []const u8, expected: []const u8) !void {
+            const literal_text = try Utf8View.init(literal);
+            _ = try Utf8View.init(expected);
+
+            var check = Self{ .buf = .{ .ok = try ArrayList(u8).initCapacity(allocator, literal.len) } };
+            defer check.deinit();
+
+            try unescapeUnicode(literal_text, .str, &check, Error, callback);
+            try testing.expect(check.buf == .ok);
+            try testing.expectEqualStrings(expected, check.buf.ok.items);
+        }
+    };
+
+    try Check.run("foo", "foo");
+    try Check.run("", "");
+    try Check.run(" \t\n", " \t\n");
+
+    try Check.run("hello \\\n     world", "hello world");
+    try Check.run("thread's", "thread's");
+}
+
+test "unescape byte bad" {
+    const Check = struct {
+        fn run(literal: []const u8, expected_error: EscapeError) !void {
+            const literal_text = try Utf8View.init(literal);
+            try testing.expectEqual(expected_error, unescapeByte(literal_text));
+        }
+    };
+
+    try Check.run("", error.ZeroChars);
+    try Check.run("\\", error.LoneSlash);
+
+    try Check.run("\n", error.EscapeOnlyChar);
+    try Check.run("\t", error.EscapeOnlyChar);
+    try Check.run("'", error.EscapeOnlyChar);
+    try Check.run("\r", error.BareCarriageReturn);
+
+    try Check.run("spam", error.MoreThanOneChar);
+    try Check.run("\\x0ff", error.MoreThanOneChar);
+    try Check.run("\\\"a", error.MoreThanOneChar);
+    try Check.run("\\na", error.MoreThanOneChar);
+    try Check.run("\\ra", error.MoreThanOneChar);
+    try Check.run("\\ta", error.MoreThanOneChar);
+    try Check.run("\\\\a", error.MoreThanOneChar);
+    try Check.run("\\'a", error.MoreThanOneChar);
+    try Check.run("\\0a", error.MoreThanOneChar);
+
+    try Check.run("\\v", error.InvalidEscape);
+    try Check.run("\\💩", error.InvalidEscape);
+    try Check.run("\\●", error.InvalidEscape);
+
+    try Check.run("\\x", error.TooShortHexEscape);
+    try Check.run("\\x0", error.TooShortHexEscape);
+    try Check.run("\\xa", error.TooShortHexEscape);
+    try Check.run("\\xf", error.TooShortHexEscape);
+    try Check.run("\\xx", error.InvalidCharInHexEscape);
+    try Check.run("\\xы", error.InvalidCharInHexEscape);
+    try Check.run("\\x🦀", error.InvalidCharInHexEscape);
+    try Check.run("\\xtt", error.InvalidCharInHexEscape);
+
+    try Check.run("\\u", error.NoBraceInUnicodeEscape);
+    try Check.run("\\u[0123]", error.NoBraceInUnicodeEscape);
+    try Check.run("\\u{0x}", error.InvalidCharInUnicodeEscape);
+    try Check.run("\\u{", error.UnclosedUnicodeEscape);
+    try Check.run("\\u{0000", error.UnclosedUnicodeEscape);
+    try Check.run("\\u{}", error.EmptyUnicodeEscape);
+    try Check.run("\\u{_0000}", error.LeadingUnderscoreUnicodeEscape);
+    try Check.run("\\u{0000000}", error.OverlongUnicodeEscape);
+
+    try Check.run("ы", error.NonAsciiCharInByte);
+    try Check.run("🦀", error.NonAsciiCharInByte);
+
+    try Check.run("\\u{0}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{000000}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{41}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{0041}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{00_41}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{4__1__}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{1F63b}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{0}x", error.UnicodeEscapeInByte);
+    try Check.run("\\u{1F63b}}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{FFFFFF}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{ffffff}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{ffffff}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{DC00}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{DDDD}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{DFFF}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{D800}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{DAAA}", error.UnicodeEscapeInByte);
+    try Check.run("\\u{DBFF}", error.UnicodeEscapeInByte);
+}
+
+test "unescape byte good" {
+    const Check = struct {
+        fn run(literal: []const u8, expected_byte: u8) !void {
+            const literal_text = try Utf8View.init(literal);
+            try testing.expectEqual(expected_byte, unescapeByte(literal_text));
+        }
+    };
+
+    try Check.run("a", 'a');
+
+    try Check.run("\\\"", '"');
+    try Check.run("\\n", '\n');
+    try Check.run("\\r", '\r');
+    try Check.run("\\t", '\t');
+    try Check.run("\\\\", '\\');
+    try Check.run("\\'", '\'');
+    try Check.run("\\0", 0);
+
+    try Check.run("\\x00", 0);
+    try Check.run("\\x5a", 'Z');
+    try Check.run("\\x5A", 'Z');
+    try Check.run("\\x7f", 127);
+    try Check.run("\\x80", 128);
+    try Check.run("\\xff", 255);
+    try Check.run("\\xFF", 255);
+}
+
+test "unescape byte str good" {
+    const Check = struct {
+        const Self = @This();
+        const Error = Allocator.Error;
+        const Result = union(enum) {
+            ok: ArrayList(u8),
+            err: struct { usize, usize, EscapeError },
+        };
+
+        buf: Result,
+
+        fn deinit(self: *Self) void {
+            switch (self.buf) {
+                .ok => |*b| b.deinit(),
+                .err => {},
+            }
+            self.* = undefined;
+        }
+
+        fn callback(self: *Self, start: usize, end: usize, res: EscapeError!u21) Error!void {
+            switch (self.buf) {
+                .ok => |*b| {
+                    if (res) |c| {
+                        try b.append(byteFromChar(c));
+                    } else |e| {
+                        self.buf = .{ .err = .{ start, end, e } };
+                    }
+                },
+                .err => {},
+            }
+        }
+
+        fn run(literal: []const u8, expected: []const u8) !void {
+            const literal_text = try Utf8View.init(literal);
+
+            var check = Self{ .buf = .{ .ok = try ArrayList(u8).initCapacity(allocator, literal.len) } };
+            defer check.deinit();
+
+            try unescapeUnicode(literal_text, .byte_str, &check, Error, callback);
+            try testing.expect(check.buf == .ok);
+            try testing.expectEqualStrings(expected, check.buf.ok.items);
+        }
+    };
+
+    try Check.run("foo", "foo");
+    try Check.run("", "");
+    try Check.run(" \t\n", " \t\n");
+
+    try Check.run("hello \\\n     world", "hello world");
+    try Check.run("thread's", "thread's");
+}
+
+test "unescape raw str" {
+    const Check = CheckUnescaped(.raw_str);
+    try Check.run("\r", &.{.{ 0, 1, error.BareCarriageReturnInRawString }});
+    try Check.run("\rx", &.{ .{ 0, 1, error.BareCarriageReturnInRawString }, .{ 1, 2, 'x' } });
+}
+
+test "unescape raw byte str" {
+    const Check = CheckUnescaped(.raw_byte_str);
+    try Check.run("\r", &.{.{ 0, 1, error.BareCarriageReturnInRawString }});
+    try Check.run("🦀", &.{.{ 0, 4, error.NonAsciiCharInByte }});
+    try Check.run("🦀a", &.{ .{ 0, 4, error.NonAsciiCharInByte }, .{ 4, 5, 'a' } });
 }
